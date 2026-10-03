@@ -91,4 +91,53 @@ class Critic(Middleware):
         #     claims = [], citations = [], và viết lại "answer" nói rõ là
         #     không đủ căn cứ.
         #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+        observed = ctx.observed_text
+        docs = [
+            doc for doc in ctx.corpus.docs
+            if doc.body and doc.body in observed
+        ] if ctx.corpus is not None else []
+
+        def source_for(part, exclude=None):
+            return next(
+                (doc for doc in docs if doc is not exclude and any(
+                    part in line for line in doc.body.splitlines()
+                )),
+                None,
+            ) if part else None
+
+        kept = []
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text")
+            if not isinstance(text, str) or not text:
+                continue
+            if text in observed:
+                kept.append(claim)
+                continue
+            start = 0
+            while (cut := text.find(" và ", start)) >= 0:
+                left, right = text[:cut], text[cut + len(" và "):]
+                first = source_for(left)
+                second = source_for(right, exclude=first)
+                if first is not None and second is not None:
+                    kept.extend([
+                        {"text": left, "doc_id": first.doc_id},
+                        {"text": right, "doc_id": second.doc_id},
+                    ])
+                    report["abstain"] = True
+                    break
+                # Adjacent separators ("và và") share a space; keep it searchable.
+                start = cut + 1
+        report["claims"] = kept
+        report["citations"] = sorted({
+            claim["doc_id"] for claim in kept
+            if isinstance(claim.get("doc_id"), str) and claim["doc_id"]
+        })
+        if not kept:
+            report["abstain"] = True
+            report["answer"] = "Không đủ căn cứ từ tài liệu đã quan sát để trả lời."
+        return report
